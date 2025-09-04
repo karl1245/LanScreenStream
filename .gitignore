@@ -1,0 +1,50 @@
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration files
+local.properties
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Android Studio captures
+captures/
+
+# Logs
+*.log
+
+# Keystore files
+*.jks
+*.keystore
+
+# Android profiling / lint
+*.hprof
+lint/intermediates/
+lint/generated/
+lint/outputs/
+lint/tmp/
+
+# OS-specific junk
+.DS_Store
+Thumbs.db
+
+# Generated files
+generated/
+out/
+
+# APK / AAB outputs
+*.apk
+*.ap_
+*.aab
+
+# Misc
+*.class
+*.dex
+*.so
+*.dll
+*.tmp
+*.swp
