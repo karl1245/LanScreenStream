@@ -8,8 +8,9 @@ import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.TextUtils;
 import android.widget.Button;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -22,7 +23,9 @@ import androidx.core.content.ContextCompat;
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQ_NOTIF = 1001;
-    private static final int SERVER_PORT = 8080;
+
+    public static final String EXTRA_TARGET_HEIGHT = "extra_target_height"; // 480 / 720 / 1080
+    public static final String EXTRA_JPEG_QUALITY = "extra_jpeg_quality";   // optional (0..100)
 
     private MediaProjectionManager mpManager;
     private int resultCode;
@@ -30,6 +33,8 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView tvStatus, tvUrl;
     private Button btnStart, btnStop;
+    private RadioGroup rgQuality;
+    private RadioButton rb480, rb720, rb1080;
 
     private final ActivityResultLauncher<Intent> screenCaptureLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -51,6 +56,10 @@ public class MainActivity extends AppCompatActivity {
         tvUrl = findViewById(R.id.tvUrl);
         btnStart = findViewById(R.id.btnStart);
         btnStop = findViewById(R.id.btnStop);
+        rgQuality = findViewById(R.id.rgQuality);
+        rb480 = findViewById(R.id.rb480);
+        rb720 = findViewById(R.id.rb720);
+        rb1080 = findViewById(R.id.rb1080);
 
         mpManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
 
@@ -60,18 +69,10 @@ public class MainActivity extends AppCompatActivity {
         updateUrlDisplay();
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        updateUrlDisplay();
-    }
-
     private void checkAndStart() {
         if (Build.VERSION.SDK_INT >= 33) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this,
-                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
                 return;
             }
         }
@@ -83,17 +84,27 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void startStreamService() {
-        String deviceIp = NetworkUtils.getLocalIpAddress(this);
-        String deviceUrl = buildHttp(deviceIp, SERVER_PORT);
+    private int getSelectedTargetHeight() {
+        int checkedId = rgQuality.getCheckedRadioButtonId();
+        if (checkedId == R.id.rb480) return 480;
+        if (checkedId == R.id.rb1080) return 1080;
+        return 720; // default
+    }
 
-        // Show helpful text before starting, in case user wants to copy it
-        tvUrl.setText(buildUiUrlText(deviceIp, SERVER_PORT));
-        tvStatus.setText(getString(R.string.status_running, deviceUrl));
+    private void startStreamService() {
+        String ip = NetworkUtils.getLocalIpAddress(this);
+        String url = "http://" + ip + ":8080/";
+        tvUrl.setText(url);
+        tvStatus.setText(getString(R.string.status_running, url));
 
         Intent svc = new Intent(this, StreamService.class);
         svc.putExtra("resultCode", resultCode);
         svc.putExtra("data", resultData);
+
+        // pass chosen quality; you can also pass JPEG quality if you want (e.g. 60..85)
+        svc.putExtra(EXTRA_TARGET_HEIGHT, getSelectedTargetHeight());
+        svc.putExtra(EXTRA_JPEG_QUALITY, 70);
+
         ContextCompat.startForegroundService(this, svc);
     }
 
@@ -103,41 +114,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateUrlDisplay() {
-        String deviceIp = NetworkUtils.getLocalIpAddress(this);
-        tvUrl.setText(buildUiUrlText(deviceIp, SERVER_PORT));
-    }
-
-    private String buildUiUrlText(String deviceIp, int port) {
-        StringBuilder sb = new StringBuilder();
-
-        if (!TextUtils.isEmpty(deviceIp)) {
-            sb.append("Device URL: ").append(buildHttp(deviceIp, port));
+        String ip = NetworkUtils.getLocalIpAddress(this);
+        if (ip != null) {
+            String url = "http://" + ip + ":8080/";
+            tvUrl.setText(url);
         } else {
-            sb.append("Device URL: No LAN IP found");
+            tvUrl.setText("No LAN IP found");
         }
-
-        return sb.toString();
-    }
-
-    private static String buildHttp(String ip, int port) {
-        if (TextUtils.isEmpty(ip)) return "N/A";
-        return "http://" + ip + ":" + port + "/";
-    }
-
-    private boolean isProbablyEmulator() {
-        final String fp = Build.FINGERPRINT != null ? Build.FINGERPRINT.toLowerCase() : "";
-        final String model = Build.MODEL != null ? Build.MODEL.toLowerCase() : "";
-        final String brand = Build.BRAND != null ? Build.BRAND.toLowerCase() : "";
-        final String product = Build.PRODUCT != null ? Build.PRODUCT.toLowerCase() : "";
-
-        return fp.contains("generic") || fp.contains("ranchu") || fp.contains("emulator")
-                || model.contains("android sdk built for") || brand.contains("generic")
-                || product.contains("sdk") || product.contains("emulator") || product.contains("google_sdk");
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
-                                           @NonNull int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_NOTIF) {
             checkAndStart();

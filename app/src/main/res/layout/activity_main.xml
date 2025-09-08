@@ -17,6 +17,43 @@
             android:textSize="18sp"
             android:paddingBottom="12dp" />
 
+        <!-- NEW: Quality selector -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stream quality:"
+            android:paddingBottom="8dp" />
+
+        <RadioGroup
+            android:id="@+id/rgQuality"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rb480"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="480p" />
+
+            <RadioButton
+                android:id="@+id/rb720"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="720p"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/rb1080"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="1080p" />
+        </RadioGroup>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="8dp" />
+
         <Button
             android:id="@+id/btnStart"
             android:layout_width="match_parent"

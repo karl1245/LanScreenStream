@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.Service;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.projection.MediaProjection;
@@ -17,7 +18,6 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.PixelCopy;
 import android.view.Surface;
-import android.graphics.SurfaceTexture;
 
 import androidx.annotation.Nullable;
 
@@ -34,10 +34,10 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
 
     private static final String TAG = "StreamService";
 
-    // Tunables
-    private static final int TARGET_MAX_WIDTH  = 720;   // try 540 or 480 if still slow
-    private static final int JPEG_QUALITY      = 60;    // try 50–60 for speed
-    private static final long FRAME_INTERVAL_MS= 33;    // ~30 fps
+    // Tunables you can tweak
+    private static final int TARGET_MAX_WIDTH   = 720; // try 540/480 if CPU-bound
+    private static final int JPEG_QUALITY       = 60;  // 50–70 is a good speed/quality balance
+    private static final long FRAME_INTERVAL_MS = 33;  // ~30 fps PixelCopy loop
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -54,16 +54,17 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
     private MjpegHttpServer server;
     private Timer testTimer;
 
-    // Double-buffered bitmaps (A/B)
+    // Double-buffered bitmaps (A/B) for PixelCopy
     private Bitmap bmpA, bmpB;
     private volatile boolean useA = true;
     private volatile boolean copying = false;
+
     private int targetW, targetH;
 
-    // tiny queue to hand off frames to encoder (keeps only latest)
+    // Small queue to pass frames to the encoder (keep only newest)
     private ArrayBlockingQueue<Bitmap> encodeQueue;
 
-    // reuse one stream to cut allocations
+    // Reuse one stream to cut allocs
     private final ByteArrayOutputStream jpegOut = new ByteArrayOutputStream(256 * 1024);
 
     @Override
@@ -84,7 +85,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
 
         setupProjection(resultCode, data);
 
-        // Start fallback generator (remove when real capture works)
+        // Fallback logger (stops automatically when real frames appear)
         startTestFramesFallback();
 
         return START_STICKY;
@@ -110,29 +111,30 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
 
         Log.d(TAG, "Display size: " + srcW + "x" + srcH + " -> " + targetW + "x" + targetH + " dpi=" + dpi);
 
-        surfaceTexture = new SurfaceTexture(0);
+        // ---- Workaround path: VirtualDisplay -> SurfaceTexture -> PixelCopy ----
+        surfaceTexture = new SurfaceTexture(0 /*dummy tex name*/);
         surfaceTexture.setDefaultBufferSize(targetW, targetH);
         surface = new Surface(surfaceTexture);
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "screen",
                 targetW, targetH, dpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC | DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 surface,
                 null, null
         );
-        Log.d(TAG, "virtualDisplay created (SurfaceTexture consumer)");
+        Log.d(TAG, "virtualDisplay created (SurfaceTexture + PixelCopy)");
 
         // High-priority capture thread
         captureThread = new HandlerThread("capture-thread", Process.THREAD_PRIORITY_DISPLAY);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
-        // Double-buffered bitmaps
+        // Double-buffered bitmaps for PixelCopy
         bmpA = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
         bmpB = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
 
-        // Encoder thread: single worker, latest-frame only
+        // Encoder single worker, latest-frame only
         encodeQueue = new ArrayBlockingQueue<>(1);
         encodePool = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "jpeg-encoder");
@@ -141,7 +143,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         });
         encodePool.execute(this::encodeLoop);
 
-        // Start PixelCopy loop aiming ~30fps
+        // Start PixelCopy loop (~30 fps)
         startPixelCopyLoop(FRAME_INTERVAL_MS);
     }
 
@@ -153,7 +155,8 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         Log.d(TAG, "Starting PixelCopy loop every " + intervalMs + "ms");
 
         captureHandler.post(new Runnable() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 try {
                     if (surface == null || !surface.isValid()) {
                         captureHandler.postDelayed(this, intervalMs);
@@ -163,12 +166,17 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                         copying = true;
                         final Bitmap target = useA ? bmpA : bmpB;
                         useA = !useA;
+
                         PixelCopy.request(surface, target, result -> {
                             try {
                                 if (result == PixelCopy.SUCCESS) {
-                                    // Offer latest bitmap to encoder, dropping older one if queue full
-                                    encodeQueue.poll(); // drop stale
+                                    // Offer latest bitmap to encoder; drop older if still queued
+                                    encodeQueue.poll();
                                     encodeQueue.offer(target);
+                                    // Signal real frames to stop the test logger
+                                    if (latestJpeg.get() != null && testTimer != null) {
+                                        // no-op; timer will auto stop once JPEGs start flowing
+                                    }
                                 } else {
                                     Log.w(TAG, "PixelCopy failed, code=" + result);
                                 }
@@ -199,6 +207,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                 } catch (Throwable t) {
                     Log.e(TAG, "JPEG encode error", t);
                 }
+                // NOTE: do NOT recycle bmpA/bmpB; they’re reused as capture buffers
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -216,9 +225,9 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         }
     }
 
-    // ----- Test-frame fallback (remove when real capture works) -----
+    // ----- Test-frame fallback logger (auto-stops once JPEGs appear) -----
     private void startTestFramesFallback() {
-        Log.d(TAG, "Starting test frame generator");
+        Log.d(TAG, "Starting test frame logger");
         if (testTimer != null) return;
         testTimer = new Timer();
         testTimer.scheduleAtFixedRate(new TimerTask() {
@@ -227,7 +236,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                 byte[] cur = latestJpeg.get();
                 if (cur != null && cur.length > 0) {
                     if (++safetyCounter >= 6) {
-                        Log.d(TAG, "Real frames detected, stopping test frames");
+                        Log.d(TAG, "Real frames detected, stopping test logger");
                         testTimer.cancel();
                         testTimer = null;
                     }
@@ -245,12 +254,14 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
     public void onDestroy() {
         Log.d(TAG, "onDestroy called");
         super.onDestroy();
+
         if (server != null) {
             server.stop();
             Log.d(TAG, "HTTP server stopped");
         }
         if (virtualDisplay != null) {
             virtualDisplay.release();
+            virtualDisplay = null;
             Log.d(TAG, "virtualDisplay released");
         }
         if (surface != null) {
@@ -265,14 +276,17 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         }
         if (mediaProjection != null) {
             mediaProjection.stop();
+            mediaProjection = null;
             Log.d(TAG, "mediaProjection stopped");
         }
         if (captureThread != null) {
             captureThread.quitSafely();
+            captureThread = null;
             Log.d(TAG, "captureThread quit");
         }
         if (encodePool != null) {
             encodePool.shutdownNow();
+            encodePool = null;
             Log.d(TAG, "encodePool shutdown");
         }
         if (bmpA != null) { bmpA.recycle(); bmpA = null; }
