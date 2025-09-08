@@ -17,43 +17,58 @@ import java.util.List;
 
 public class NetworkUtils {
 
-    public static String getLocalIpAddress(Context ctx) {
+    public static String getLocalIp(Context ctx) {
+        // Try the active network first (Android 6+)
         try {
             ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null && Build.VERSION.SDK_INT >= 23) {
-                for (Network network : cm.getAllNetworks()) {
-                    NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                    if (caps == null) continue;
-                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
-                        LinkProperties props = cm.getLinkProperties(network);
-                        if (props == null) continue;
-                        List<LinkAddress> addrs = props.getLinkAddresses();
+            if (cm != null) {
+                Network active = cm.getActiveNetwork();
+                if (active != null) {
+                    LinkProperties lp = cm.getLinkProperties(active);
+                    if (lp != null) {
+                        List<LinkAddress> addrs = lp.getLinkAddresses();
                         for (LinkAddress la : addrs) {
-                            InetAddress addr = la.getAddress();
-                            if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
-                                return addr.getHostAddress();
+                            InetAddress a = la.getAddress();
+                            if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                                return a.getHostAddress();
                             }
                         }
                     }
                 }
-            }
-        } catch (Exception ignored) {}
 
-        try {
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            if (interfaces == null) return "0.0.0.0";
-            for (NetworkInterface nif : Collections.list(interfaces)) {
-                if (!nif.isUp() || nif.isLoopback()) continue;
-                Enumeration<InetAddress> addrs = nif.getInetAddresses();
-                for (InetAddress addr : Collections.list(addrs)) {
-                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
-                        return addr.getHostAddress();
+                // Fallback: iterate all networks, prefer WIFI/ETHERNET
+                for (Network n : cm.getAllNetworks()) {
+                    NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                    if (nc == null) continue;
+                    boolean good = nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                            || nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+                    if (!good) continue;
+                    LinkProperties lp = cm.getLinkProperties(n);
+                    if (lp == null) continue;
+                    for (LinkAddress la : lp.getLinkAddresses()) {
+                        InetAddress a = la.getAddress();
+                        if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                            return a.getHostAddress();
+                        }
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        } catch (Throwable ignored) {}
+
+        // Last resort: enumerate interfaces
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            for (NetworkInterface nif : Collections.list(ifaces)) {
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                Enumeration<InetAddress> addrs = nif.getInetAddresses();
+                for (InetAddress a : Collections.list(addrs)) {
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
         return "0.0.0.0";
     }
 }

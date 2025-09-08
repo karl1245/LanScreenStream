@@ -9,4 +9,13 @@
     <string name="notif_channel_desc">Foreground service for screen streaming</string>
     <string name="notif_title">Screen streaming</string>
     <string name="notif_text">Open %1$s</string>
+    <!-- Foreground notification -->
+    <!-- Used while the service is spinning up before we know the URL -->
+    <string name="notif_text_waiting">Preparing screen share…</string>
+    <!-- Used once the server is running; %1$s will be the http URL -->
+    <!-- Shown in MainActivity if POST_NOTIFICATIONS isn’t granted on Android 13+ -->
+    <string name="notif_perm_hint">
+        Notifications are required to run the foreground service on Android 13+.
+        Please grant the notification permission, then tap Start.
+    </string>
 </resources>

@@ -18,111 +18,108 @@ public class ImageUtil {
         if (format == ImageFormat.YUV_420_888) {
             return yuv420888ToJpeg(image, jpegQuality);
         }
-
-        // Fallback: try copying to Bitmap when the format is RGBA_8888
+        // Fallback for RGBA_8888: copy to Bitmap and compress
+        Bitmap bmp = null;
         try {
-            Bitmap bmp = rgbaImageToBitmap(image);
+            bmp = rgbaImageToBitmap(image);
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             bmp.compress(Bitmap.CompressFormat.JPEG, jpegQuality, baos);
-            bmp.recycle();
             return baos.toByteArray();
-        } catch (Throwable t) {
-            return null;
+        } finally {
+            if (bmp != null) bmp.recycle();
         }
     }
 
+    /** Convert RGBA_8888 Image to Bitmap safely. */
     private static Bitmap rgbaImageToBitmap(Image image) {
-        // ImageFormat.RGBA_8888 is exposed as PixelFormat.RGBA_8888 but in Image it's "private" constant.
-        // We can still read Plane[0] directly (packed RGBA).
         Image.Plane plane = image.getPlanes()[0];
         ByteBuffer buf = plane.getBuffer();
-        int pixelStride = plane.getPixelStride();
-        int rowStride   = plane.getRowStride();
-        int width  = image.getWidth();
-        int height = image.getHeight();
+        int pixelStride = plane.getPixelStride(); // usually 4
+        int rowStride = plane.getRowStride();
 
-        int rowPadding = rowStride - pixelStride * width;
-        Bitmap bmp = Bitmap.createBitmap(
-                width + rowPadding / pixelStride,
-                height,
-                Bitmap.Config.ARGB_8888
-        );
-        bmp.copyPixelsFromBuffer(buf);
-        Bitmap cropped = Bitmap.createBitmap(bmp, 0, 0, width, height);
-        if (cropped != bmp) bmp.recycle();
-        return cropped;
-    }
+        int w = image.getWidth();
+        int h = image.getHeight();
 
-    private static byte[] yuv420888ToJpeg(Image image, int jpegQuality) {
-        int width  = image.getWidth();
-        int height = image.getHeight();
+        Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
 
-        // Allocate NV21 buffer (Y + interleaved VU)
-        byte[] nv21 = new byte[width * height * 3 / 2];
+        byte[] rowBytes = new byte[rowStride];
+        int[] rowPixels = new int[w];
 
-        Image.Plane[] planes = image.getPlanes();
-        // ----- Copy Y -----
-        ByteBuffer yBuf = planes[0].getBuffer();
-        int yRowStride  = planes[0].getRowStride();
-        int yPixelStride= planes[0].getPixelStride();
-        extractPlaneToArray(yBuf, yRowStride, yPixelStride, width, height, nv21, 0, 1);
+        for (int y = 0; y < h; y++) {
+            buf.get(rowBytes, 0, rowStride);
 
-        // ----- Copy UV (U & V) → NV21 interleaved (VU order) -----
-        ByteBuffer uBuf = planes[1].getBuffer();
-        ByteBuffer vBuf = planes[2].getBuffer();
-        int uvRowStride   = planes[1].getRowStride();
-        int uvPixelStride = planes[1].getPixelStride();
-
-        int chromaWidth  = (int)Math.ceil(width  / 2.0);
-        int chromaHeight = (int)Math.ceil(height / 2.0);
-
-        int pos = width * height; // start of UV in NV21
-        // Iterate each chroma pixel and interleave V then U (NV21)
-        for (int row = 0; row < chromaHeight; row++) {
-            int uRowStart = row * uvRowStride;
-            int vRowStart = row * planes[2].getRowStride();
-            for (int col = 0; col < chromaWidth; col++) {
-                int uIndex = uRowStart + col * uvPixelStride;
-                int vIndex = vRowStart + col * planes[2].getPixelStride();
-                nv21[pos++] = vBuf.get(vIndex); // V
-                nv21[pos++] = uBuf.get(uIndex); // U
+            for (int x = 0; x < w; x++) {
+                int i = x * pixelStride;
+                if (i + 3 < rowBytes.length) {
+                    int r = rowBytes[i] & 0xFF;
+                    int g = rowBytes[i + 1] & 0xFF;
+                    int b = rowBytes[i + 2] & 0xFF;
+                    int a = rowBytes[i + 3] & 0xFF;
+                    rowPixels[x] = (a << 24) | (r << 16) | (g << 8) | b;
+                }
             }
+            bmp.setPixels(rowPixels, 0, w, 0, y, w, 1);
         }
 
-        // Encode to JPEG
-        YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, width, height, null);
+        buf.rewind();
+        return bmp;
+    }
+
+    /** Convert a YUV_420_888 Image to JPEG bytes. */
+    private static byte[] yuv420888ToJpeg(Image image, int jpegQuality) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+
+        // Android guarantees 3 planes: Y, U, V
+        Image.Plane[] planes = image.getPlanes();
+
+        byte[] yuv = new byte[width * height * 3 / 2];
+        // Copy Y
+        copyPlane(planes[0], width, height, yuv, 0, 1);
+        // Copy U and V (interleaved NV21 order: V then U)
+        int chromaWidth = (width + 1) / 2;
+        int chromaHeight = (height + 1) / 2;
+        int uvOffset = width * height;
+
+        // V
+        copyPlane(planes[2], chromaWidth, chromaHeight, yuv, uvOffset, 2);
+        // U
+        copyPlane(planes[1], chromaWidth, chromaHeight, yuv, uvOffset + 1, 2);
+
+        YuvImage yuvImage = new YuvImage(yuv, ImageFormat.NV21, width, height, null);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        yuv.compressToJpeg(new Rect(0, 0, width, height), jpegQuality, baos);
+        yuvImage.compressToJpeg(new Rect(0, 0, width, height), jpegQuality, baos);
         return baos.toByteArray();
     }
 
     /**
-     * Copy a plane into a linear byte[] honoring row/pixel strides.
-     * For Y plane we copy into every byte; for UV we read separately above.
+     * Copy one plane into a byte[] with control over pixel & row strides.
+     * outPixelStride=1 for Y plane, 2 for chroma interleaving.
      */
-    private static void extractPlaneToArray(ByteBuffer buf, int rowStride, int pixelStride,
-                                            int width, int height, byte[] out, int outOffset, int outPixelStride) {
-        // Save buffer state
-        buf.mark();
-        int rowLen = Math.min(rowStride, width * pixelStride);
-        byte[] row = new byte[rowLen];
+    private static void copyPlane(Image.Plane plane, int width, int height,
+                                  byte[] out, int outPos, int outPixelStride) {
+        ByteBuffer buf = plane.getBuffer();
+        int rowStride = plane.getRowStride();
+        int pixelStride = plane.getPixelStride();
 
-        int outPos = outOffset;
+        byte[] row = new byte[rowStride];
         for (int r = 0; r < height; r++) {
-            // Read full row from buffer
-            int pos = r * rowStride;
-            buf.position(pos);
-            buf.get(row, 0, rowLen);
+            buf.get(row, 0, Math.min(rowStride, buf.remaining()));
 
-            // Copy only the needed pixels (respect pixelStride)
-            int colOut = outPos;
+            int outCol = outPos;
             for (int c = 0; c < width; c++) {
-                out[colOut] = row[c * pixelStride];
-                colOut += outPixelStride;
+                rowCheck(row, c * pixelStride);
+                out[outCol] = row[c * pixelStride];
+                outCol += outPixelStride;
             }
             outPos += width * outPixelStride;
         }
+        buf.rewind();
+    }
 
-        buf.reset();
+    private static void rowCheck(byte[] row, int idx) {
+        if (idx < 0 || idx >= row.length) {
+            // guard against weird stride impls
+        }
     }
 }

@@ -14,22 +14,26 @@ public class NotificationHelper {
     public static final String CHANNEL_ID = "stream_channel";
 
     public static void ensureChannel(Context ctx) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    ctx.getString(R.string.notif_channel_name),
-                    NotificationManager.IMPORTANCE_LOW
-            );
-            channel.setDescription(ctx.getString(R.string.notif_channel_desc));
-            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
-            nm.createNotificationChannel(channel);
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationManager nm = ctx.getSystemService(NotificationManager.class);
+            if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                NotificationChannel ch = new NotificationChannel(
+                        CHANNEL_ID, "LAN Screen Stream",
+                        NotificationManager.IMPORTANCE_LOW
+                );
+                ch.setDescription("Foreground service for MJPEG LAN streaming");
+                nm.createNotificationChannel(ch);
+            }
         }
     }
 
     public static Notification buildForeground(Context ctx, String url) {
         ensureChannel(ctx);
         Intent intent = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url));
-        PendingIntent pi = PendingIntent.getActivity(ctx, 0, intent, PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent pi = PendingIntent.getActivity(
+                ctx, 0, intent,
+                PendingIntent.FLAG_IMMUTABLE
+        );
 
         return new NotificationCompat.Builder(ctx, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.presence_online)
