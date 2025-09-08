@@ -1,120 +1,266 @@
 package com.example.lanscreenstream;
 
-import fi.iki.elonen.NanoHTTPD;
+import android.util.Log;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-public class MjpegHttpServer extends NanoHTTPD {
+public class MjpegHttpServer {
+
+    private static final String TAG = "MjpegHttpServer";
 
     public interface FrameSource {
-        byte[] getLatestJpeg(); // may return null if no frame yet
+        byte[] getLatestJpeg();
     }
 
-    private volatile FrameSource frameSource;
-    private final int fps;
+    private final int port;
+    private final int maxClients;
+    private volatile boolean running = false;
 
-    public MjpegHttpServer(int port, int fps) {
-        super(port);
-        this.fps = Math.max(1, Math.min(fps, 30));
+    private ServerSocket serverSocket;
+    private Thread acceptThread;
+    private ExecutorService clientPool;
+
+    private FrameSource frameSource;
+
+    // Simple viewer page with "Save Screenshot" button
+    private static final String INDEX_HTML =
+            "<!DOCTYPE html><html><head><meta charset='utf-8'/>"
+                    + "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+                    + "<title>LAN Screen Stream</title>"
+                    + "<style>body{font-family:system-ui,Arial;margin:16px} "
+                    + "#v{max-width:100%;border:1px solid #ccc;border-radius:8px}</style>"
+                    + "</head><body>"
+                    + "<h2>LAN Screen Stream</h2>"
+                    + "<p>Live MJPEG stream:</p>"
+                    + "<img id='v' src='/stream.mjpg' alt='stream'/>"
+                    + "<div style='margin-top:12px;'>"
+                    + "  <button id='btnShot'>Save Screenshot</button>"
+                    + "  <a id='dl' href='/frame.jpg' download style='margin-left:8px'>Download current frame</a>"
+                    + "</div>"
+                    + "<script>"
+                    + "document.getElementById('btnShot').onclick=()=>{"
+                    + "  fetch('/frame.jpg',{cache:'no-store'}).then(r=>r.blob()).then(b=>{"
+                    + "    const url=URL.createObjectURL(b);"
+                    + "    const a=document.createElement('a');"
+                    + "    const ts=new Date().toISOString().replace(/[:.]/g,'-');"
+                    + "    a.href=url; a.download='screenshot-'+ts+'.jpg';"
+                    + "    document.body.appendChild(a); a.click(); a.remove();"
+                    + "    URL.revokeObjectURL(url);"
+                    + "  }).catch(e=>alert('Failed to save screenshot: '+e));"
+                    + "};"
+                    + "</script>"
+                    + "</body></html>";
+
+    public MjpegHttpServer(int port, int maxClients) {
+        this.port = port;
+        this.maxClients = Math.max(1, maxClients);
     }
 
     public void setFrameSource(FrameSource src) {
         this.frameSource = src;
     }
 
-    @Override
-    public Response serve(IHTTPSession session) {
-        String uri = session.getUri();
-        if ("/".equals(uri)) {
-            String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                    + "<title>LAN Screen Stream</title>"
-                    + "<style>body{margin:0;background:#111;display:flex;align-items:center;justify-content:center;height:100vh}"
-                    + "img{max-width:100vw;max-height:100vh}</style></head>"
-                    + "<body><img src='/stream.mjpg' alt='stream'></body></html>";
-            return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html);
-        } else if ("/stream.mjpg".equals(uri)) {
-            String boundary = "--frame";
-            InputStream is = new MultipartMjpegStream(boundary, () -> frameSource != null ? frameSource.getLatestJpeg() : null, fps);
-            Response r = newChunkedResponse(Response.Status.OK,
-                    "multipart/x-mixed-replace; boundary=" + boundary, is);
-            r.addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-            r.addHeader("Pragma", "no-cache");
-            r.addHeader("Connection", "close");
-            return r;
-        } else {
-            return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found");
+    public synchronized void start() throws IOException {
+        if (running) return;
+        running = true;
+
+        serverSocket = new ServerSocket(port);
+        clientPool = Executors.newFixedThreadPool(maxClients);
+
+        acceptThread = new Thread(() -> {
+            Log.d(TAG, "Accept thread started on port " + port);
+            while (running) {
+                try {
+                    Socket client = serverSocket.accept();
+                    clientPool.submit(() -> handleClient(client));
+                } catch (IOException e) {
+                    if (running) {
+                        Log.e(TAG, "Accept failed", e);
+                    }
+                }
+            }
+            Log.d(TAG, "Accept thread exiting");
+        }, "mjpeg-accept");
+        acceptThread.start();
+    }
+
+    public synchronized void stop() {
+        running = false;
+        closeQuietly(serverSocket);
+        serverSocket = null;
+
+        if (acceptThread != null) {
+            try { acceptThread.join(500); } catch (InterruptedException ignored) {}
+            acceptThread = null;
+        }
+        if (clientPool != null) {
+            clientPool.shutdownNow();
+            clientPool = null;
         }
     }
 
-    private static class MultipartMjpegStream extends InputStream {
-        interface Supplier { byte[] get(); }
+    private void handleClient(Socket socket) {
+        try (Socket s = socket;
+             BufferedInputStream in = new BufferedInputStream(s.getInputStream());
+             BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.US_ASCII));
+             OutputStream rawOut = new BufferedOutputStream(s.getOutputStream())) {
 
-        private final String boundary;
-        private final Supplier supplier;
-        private final long frameDelayMs;
+            s.setSoTimeout(0); // keep alive for stream
 
-        private byte[] currentChunk;
-        private int idx = 0;
+            // Parse request line
+            String requestLine = reader.readLine();
+            if (requestLine == null || requestLine.isEmpty()) {
+                return;
+            }
+            String[] parts = requestLine.split(" ");
+            if (parts.length < 2) {
+                return;
+            }
+            String method = parts[0];
+            String path = parts[1];
 
-        MultipartMjpegStream(String boundary, Supplier supplier, int fps) {
-            this.boundary = boundary;
-            this.supplier = supplier;
-            this.frameDelayMs = 1000L / Math.max(1, fps);
-            buildNextChunk(); // try first
-        }
+            // Consume headers (we don’t need them here)
+            String line;
+            while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                // no-op
+            }
 
-        private void buildNextChunk() {
-            try {
-                byte[] jpeg = supplier.get();
-                if (jpeg == null) {
-                    Thread.sleep(frameDelayMs);
+            if (!"GET".equalsIgnoreCase(method)) {
+                sendHttpResponse(rawOut, "405 Method Not Allowed", "text/plain; charset=UTF-8",
+                        "Only GET supported".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            // Route
+            switch (normalizePath(path)) {
+                case "/":
+                case "/index.html":
+                    sendHttpResponse(rawOut, "200 OK", "text/html; charset=UTF-8",
+                            INDEX_HTML.getBytes(StandardCharsets.UTF_8));
+                    return;
+
+                case "/frame.jpg": {
+                    byte[] frame = frameSource != null ? frameSource.getLatestJpeg() : null;
+                    if (frame == null) {
+                        sendHttpResponse(rawOut, "503 Service Unavailable", "text/plain; charset=UTF-8",
+                                "No frame".getBytes(StandardCharsets.UTF_8));
+                    } else {
+                        sendHttpResponse(rawOut, "200 OK", "image/jpeg", frame);
+                    }
                     return;
                 }
-                String header =
-                        boundary + "\r\n" +
-                        "Content-Type: image/jpeg\r\n" +
-                        "Content-Length: " + jpeg.length + "\r\n\r\n";
-                byte[] head = header.getBytes(StandardCharsets.US_ASCII);
-                byte[] tail = "\r\n".getBytes(StandardCharsets.US_ASCII);
-                currentChunk = new byte[head.length + jpeg.length + tail.length];
-                System.arraycopy(head, 0, currentChunk, 0, head.length);
-                System.arraycopy(jpeg, 0, currentChunk, head.length, jpeg.length);
-                System.arraycopy(tail, 0, currentChunk, head.length + jpeg.length, tail.length);
-                idx = 0;
-            } catch (InterruptedException ignored) {}
+
+                case "/stream.mjpg":
+                case "/stream.mjpeg":
+                case "/stream": {
+                    streamMultipart(rawOut);
+                    return;
+                }
+
+                default:
+                    sendHttpResponse(rawOut, "404 Not Found", "text/plain; charset=UTF-8",
+                            "Not Found".getBytes(StandardCharsets.UTF_8));
+            }
+
+        } catch (IOException e) {
+            Log.w(TAG, "Client connection error: " + e.getMessage());
+        }
+    }
+
+    private void streamMultipart(OutputStream out) throws IOException {
+        final String boundary = "frame";
+        PrintWriter pw = new PrintWriter(new OutputStreamWriter(out, StandardCharsets.US_ASCII), false);
+
+        // Headers
+        pw.print("HTTP/1.1 200 OK\r\n");
+        pw.print("Connection: close\r\n");
+        pw.print("Cache-Control: no-store\r\n");
+        pw.print("Pragma: no-cache\r\n");
+        pw.print("Content-Type: multipart/x-mixed-replace; boundary=" + boundary + "\r\n");
+        pw.print("\r\n");
+        pw.flush();
+
+        // Stream loop
+        final long minFrameIntervalMs = 10; // ~100 fps ceiling; actual rate depends on producer
+        long lastSent = 0;
+
+        while (running) {
+            byte[] frame = frameSource != null ? frameSource.getLatestJpeg() : null;
+            if (frame == null) {
+                sleepQuiet(50);
+                continue;
+            }
+
+            long now = System.currentTimeMillis();
+            if (now - lastSent < minFrameIntervalMs) {
+                sleepQuiet(5);
+                continue;
+            }
+            lastSent = now;
+
+            pw.print("--" + boundary + "\r\n");
+            pw.print("Content-Type: image/jpeg\r\n");
+            pw.print("Content-Length: " + frame.length + "\r\n");
+            pw.print("\r\n");
+            pw.flush();
+
+            out.write(frame);
+            out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+
+            // Small sleep to avoid hot loop if producer is super fast
+            // (MJPEG is pull-like; throttle a bit)
+            sleepQuiet(5);
         }
 
-        @Override
-        public int read() throws IOException {
-            if (currentChunk == null) {
-                buildNextChunk();
-                return -1;
-            }
-            if (idx >= currentChunk.length) {
-                try { Thread.sleep(frameDelayMs); } catch (InterruptedException ignored) {}
-                buildNextChunk();
-                if (currentChunk == null) return -1;
-            }
-            return currentChunk[idx++] & 0xFF;
-        }
+        // Write closing boundary (some clients don’t require this)
+        try {
+            pw.print("--" + boundary + "--\r\n");
+            pw.flush();
+        } catch (Throwable ignored) {}
+    }
 
-        @Override
-        public int read(byte[] b, int off, int len) throws IOException {
-            if (currentChunk == null) {
-                buildNextChunk();
-                return 0;
-            }
-            if (idx >= currentChunk.length) {
-                try { Thread.sleep(frameDelayMs); } catch (InterruptedException ignored) {}
-                buildNextChunk();
-                if (currentChunk == null) return 0;
-            }
-            int toCopy = Math.min(len, currentChunk.length - idx);
-            System.arraycopy(currentChunk, idx, b, off, toCopy);
-            idx += toCopy;
-            return toCopy;
-        }
+    private void sendHttpResponse(OutputStream out, String status, String contentType, byte[] body) throws IOException {
+        PrintWriter pw = new PrintWriter(new OutputStreamWriter(out, StandardCharsets.US_ASCII), false);
+        pw.print("HTTP/1.1 " + status + "\r\n");
+        pw.print("Content-Type: " + contentType + "\r\n");
+        pw.print("Content-Length: " + body.length + "\r\n");
+        pw.print("Cache-Control: no-store\r\n");
+        pw.print("Connection: close\r\n");
+        pw.print("\r\n");
+        pw.flush();
+        out.write(body);
+        out.flush();
+    }
+
+    private static String normalizePath(String path) {
+        if (path == null || path.isEmpty()) return "/";
+        int q = path.indexOf('?');
+        if (q >= 0) path = path.substring(0, q);
+        if (!path.startsWith("/")) path = "/" + path;
+        return path.toLowerCase(Locale.US);
+    }
+
+    private static void sleepQuiet(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+    }
+
+    private static void closeQuietly(Closeable c) {
+        if (c == null) return;
+        try { c.close(); } catch (IOException ignored) {}
     }
 }
