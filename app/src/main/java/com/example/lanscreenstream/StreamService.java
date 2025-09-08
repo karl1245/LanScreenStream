@@ -34,10 +34,17 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
 
     private static final String TAG = "StreamService";
 
-    // Tunables you can tweak
-    private static final int TARGET_MAX_WIDTH   = 720; // try 540/480 if CPU-bound
-    private static final int JPEG_QUALITY       = 60;  // 50–70 is a good speed/quality balance
-    private static final long FRAME_INTERVAL_MS = 33;  // ~30 fps PixelCopy loop
+    // Intent extras so Activity can control quality per start
+    public static final String EXTRA_MAX_WIDTH   = "maxWidth";
+    public static final String EXTRA_JPEG_QUALITY= "jpegQuality";
+
+    // Stop broadcast so Activity can re-enable UI once *fully* stopped
+    public static final String ACTION_STREAM_STOPPED = "com.example.lanscreenstream.STREAM_STOPPED";
+
+    // Defaults if extras missing
+    private int configuredMaxWidth = 720;
+    private int configuredJpegQuality = 60;
+    private static final long FRAME_INTERVAL_MS = 33;  // ~30 fps
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -71,14 +78,20 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.d(TAG, "onStartCommand called");
 
-        int resultCode = intent.getIntExtra("resultCode", 0);
-        Intent data = intent.getParcelableExtra("data");
+        // Read quality configuration from the Intent
+        if (intent != null) {
+            configuredMaxWidth = intent.getIntExtra(EXTRA_MAX_WIDTH, 720);
+            configuredJpegQuality = intent.getIntExtra(EXTRA_JPEG_QUALITY, 60);
+        }
+
+        int resultCode = intent != null ? intent.getIntExtra("resultCode", 0) : 0;
+        Intent data = intent != null ? intent.getParcelableExtra("data") : null;
 
         startHttpServer();
 
         String ip = NetworkUtils.getLocalIpAddress(this);
         String url = "http://" + ip + ":8080/";
-        Log.d(TAG, "HTTP server started at: " + url);
+        Log.d(TAG, "HTTP server started at: " + url + " (maxW=" + configuredMaxWidth + ", jpegQ=" + configuredJpegQuality + ")");
 
         Notification notif = NotificationHelper.buildForeground(this, url);
         startForeground(1, notif);
@@ -105,7 +118,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         int srcW = metrics.widthPixels;
         int srcH = metrics.heightPixels;
-        targetW = Math.min(TARGET_MAX_WIDTH, srcW);
+        targetW = Math.min(Math.max(240, configuredMaxWidth), srcW); // clamp
         targetH = Math.max(1, (int) ((long) targetW * srcH / Math.max(1, srcW)));
         int dpi = metrics.densityDpi;
 
@@ -173,10 +186,6 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                                     // Offer latest bitmap to encoder; drop older if still queued
                                     encodeQueue.poll();
                                     encodeQueue.offer(target);
-                                    // Signal real frames to stop the test logger
-                                    if (latestJpeg.get() != null && testTimer != null) {
-                                        // no-op; timer will auto stop once JPEGs start flowing
-                                    }
                                 } else {
                                     Log.w(TAG, "PixelCopy failed, code=" + result);
                                 }
@@ -189,7 +198,9 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                     copying = false;
                     Log.e(TAG, "PixelCopy.request threw", t);
                 } finally {
-                    captureHandler.postDelayed(this, intervalMs);
+                    if (captureHandler != null) {
+                        captureHandler.postDelayed(this, intervalMs);
+                    }
                 }
             }
         });
@@ -201,13 +212,11 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
                 Bitmap frame = encodeQueue.take(); // always latest due to poll/offer
                 try {
                     jpegOut.reset();
-                    frame.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpegOut);
+                    frame.compress(Bitmap.CompressFormat.JPEG, configuredJpegQuality, jpegOut);
                     latestJpeg.set(jpegOut.toByteArray());
-                    Log.d(TAG, "JPEG frame updated (q=" + JPEG_QUALITY + ", " + latestJpeg.get().length + " bytes)");
                 } catch (Throwable t) {
                     Log.e(TAG, "JPEG encode error", t);
                 }
-                // NOTE: do NOT recycle bmpA/bmpB; they’re reused as capture buffers
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -235,7 +244,7 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
             @Override public void run() {
                 byte[] cur = latestJpeg.get();
                 if (cur != null && cur.length > 0) {
-                    if (++safetyCounter >= 6) {
+                    if (++safetyCounter >= 4) {
                         Log.d(TAG, "Real frames detected, stopping test logger");
                         testTimer.cancel();
                         testTimer = null;
@@ -255,46 +264,45 @@ public class StreamService extends Service implements MjpegHttpServer.FrameSourc
         Log.d(TAG, "onDestroy called");
         super.onDestroy();
 
-        if (server != null) {
-            server.stop();
-            Log.d(TAG, "HTTP server stopped");
-        }
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-            Log.d(TAG, "virtualDisplay released");
-        }
-        if (surface != null) {
-            surface.release();
-            surface = null;
-            Log.d(TAG, "surface released");
-        }
-        if (surfaceTexture != null) {
-            surfaceTexture.release();
-            surfaceTexture = null;
-            Log.d(TAG, "surfaceTexture released");
-        }
-        if (mediaProjection != null) {
-            mediaProjection.stop();
-            mediaProjection = null;
-            Log.d(TAG, "mediaProjection stopped");
-        }
-        if (captureThread != null) {
-            captureThread.quitSafely();
-            captureThread = null;
-            Log.d(TAG, "captureThread quit");
-        }
-        if (encodePool != null) {
-            encodePool.shutdownNow();
-            encodePool = null;
-            Log.d(TAG, "encodePool shutdown");
-        }
-        if (bmpA != null) { bmpA.recycle(); bmpA = null; }
-        if (bmpB != null) { bmpB.recycle(); bmpB = null; }
-        if (testTimer != null) {
-            testTimer.cancel();
-            testTimer = null;
-            Log.d(TAG, "testTimer cancelled");
+        try {
+            if (server != null) {
+                server.stop();
+            }
+            if (virtualDisplay != null) {
+                virtualDisplay.release();
+                virtualDisplay = null;
+            }
+            if (surface != null) {
+                surface.release();
+                surface = null;
+            }
+            if (surfaceTexture != null) {
+                surfaceTexture.release();
+                surfaceTexture = null;
+            }
+            if (mediaProjection != null) {
+                mediaProjection.stop();
+                mediaProjection = null;
+            }
+            if (captureThread != null) {
+                captureThread.quitSafely();
+                captureThread = null;
+                captureHandler = null;
+            }
+            if (encodePool != null) {
+                encodePool.shutdownNow();
+                encodePool = null;
+            }
+            if (bmpA != null) { bmpA.recycle(); bmpA = null; }
+            if (bmpB != null) { bmpB.recycle(); bmpB = null; }
+            if (testTimer != null) {
+                testTimer.cancel();
+                testTimer = null;
+            }
+            Log.d(TAG, "Cleanup complete");
+        } finally {
+            // Tell the Activity we're *fully stopped* so it can re-enable UI
+            sendBroadcast(new Intent(ACTION_STREAM_STOPPED));
         }
     }
 
