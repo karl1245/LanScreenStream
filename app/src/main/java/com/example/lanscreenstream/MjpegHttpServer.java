@@ -36,34 +36,65 @@ public class MjpegHttpServer {
 
     private FrameSource frameSource;
 
-    // Simple viewer page with "Save Screenshot" button
+    // Viewer page with Fullscreen + Fit/Cover + Save
     private static final String INDEX_HTML =
-            "<!DOCTYPE html><html><head><meta charset='utf-8'/>"
-                    + "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+                    + "<meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'/>"
+                    + "<meta name='mobile-web-app-capable' content='yes'/>"
+                    + "<meta name='apple-mobile-web-app-capable' content='yes'/>"
+                    + "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'/>"
                     + "<title>LAN Screen Stream</title>"
-                    + "<style>body{font-family:system-ui,Arial;margin:16px} "
-                    + "#v{max-width:100%;border:1px solid #ccc;border-radius:8px}</style>"
-                    + "</head><body>"
-                    + "<h2>LAN Screen Stream</h2>"
-                    + "<p>Live MJPEG stream:</p>"
-                    + "<img id='v' src='/stream.mjpg' alt='stream'/>"
-                    + "<div style='margin-top:12px;'>"
-                    + "  <button id='btnShot'>Save Screenshot</button>"
-                    + "  <a id='dl' href='/frame.jpg' download style='margin-left:8px'>Download current frame</a>"
+                    + "<style>"
+                    + "html,body{height:100%;margin:0;background:#111;color:#eee;font-family:system-ui,Arial}"
+                    + /* use dynamic viewport height on mobile */
+                    ".wrap{display:flex;flex-direction:column;height:100dvh;height:100svh;height:100vh}"
+                    + ".bar{display:flex;gap:.5rem;align-items:center;padding:.6rem 1rem;background:#1b1b1b;box-shadow:0 1px 0 #0008}"
+                    + ".btn{padding:.5rem .85rem;border:none;border-radius:.5rem;background:#2c2c2c;color:#eee;cursor:pointer}"
+                    + ".btn:active{transform:scale(.98)}"
+                    + ".view{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-user-select:none;user-select:none}"
+                    + ".view img{max-width:100%;max-height:100%;object-fit:contain;touch-action:none}"
+                    + ".cover img{object-fit:cover;width:100%;height:100%}"
+                    + ".hint{opacity:.65;font-size:.9rem;margin:.25rem 1rem 0}"
+                    + "a{color:#9bd}"
+                    + "</style></head><body>"
+                    + "<div class='wrap'>"
+                    + "  <div class='bar'>"
+                    + "    <button id='fs' class='btn'>Fullscreen</button>"
+                    + "    <button id='fit' class='btn'>Fit</button>"
+                    + "    <button id='cover' class='btn'>Cover</button>"
+                    + "    <button id='btnShot' class='btn'>Save Screenshot</button>"
+                    + "    <a id='dl' href='/frame.jpg' download>Download frame</a>"
+                    + "  </div>"
+                    + "  <div id='view' class='view'><img id='v' src='/stream.mjpg' alt='stream'/></div>"
                     + "</div>"
                     + "<script>"
-                    + "document.getElementById('btnShot').onclick=()=>{"
-                    + "  fetch('/frame.jpg',{cache:'no-store'}).then(r=>r.blob()).then(b=>{"
-                    + "    const url=URL.createObjectURL(b);"
-                    + "    const a=document.createElement('a');"
-                    + "    const ts=new Date().toISOString().replace(/[:.]/g,'-');"
-                    + "    a.href=url; a.download='screenshot-'+ts+'.jpg';"
-                    + "    document.body.appendChild(a); a.click(); a.remove();"
-                    + "    URL.revokeObjectURL(url);"
-                    + "  }).catch(e=>alert('Failed to save screenshot: '+e));"
-                    + "};"
-                    + "</script>"
-                    + "</body></html>";
+                    + "const view=document.getElementById('view');"
+                    + "const fsBtn=document.getElementById('fs');"
+                    + "function enterFS(el){"
+                    + "  (el.requestFullscreen||el.webkitRequestFullscreen||el.mozRequestFullScreen||el.msRequestFullscreen)?.call(el);"
+                    + "}"
+                    + "function exitFS(){"
+                    + "  (document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen)?.call(document);"
+                    + "}"
+                    + "fsBtn.onclick=()=>{ if(!document.fullscreenElement && !document.webkitFullscreenElement){enterFS(view);} else {exitFS();} };"
+                    + "document.getElementById('fit').onclick=()=>{view.classList.remove('cover');};"
+                    + "document.getElementById('cover').onclick=()=>{view.classList.add('cover');};"
+                    + "document.addEventListener('keydown',e=>{ if(e.key==='f') fsBtn.click(); });"
+                    + "view.addEventListener('dblclick',()=>fsBtn.click());"
+                    + "// Keep the screen awake where supported (Chrome/Android and most modern browsers)"
+                    + "let wakeLock=null;"
+                    + "async function requestWakeLock(){"
+                    + "  try{ wakeLock=await navigator.wakeLock?.request('screen');"
+                    + "       wakeLock?.addEventListener('release',()=>{}); }catch(e){}"
+                    + "}"
+                    + "requestWakeLock();"
+                    + "document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible' && wakeLock?.released) requestWakeLock(); });"
+                    + "// Mobile viewport fix for older iOS (fallback to JS-calculated vh)"
+                    + "(function(){"
+                    + "  const setVH=()=>{ document.documentElement.style.setProperty('--vh', (window.innerHeight*0.01)+'px'); };"
+                    + "  setVH(); window.addEventListener('resize', setVH);"
+                    + "})();"
+                    + "</script></body></html>";
 
     public MjpegHttpServer(int port, int maxClients) {
         this.port = port;
@@ -133,11 +164,9 @@ public class MjpegHttpServer {
             String method = parts[0];
             String path = parts[1];
 
-            // Consume headers (we don’t need them here)
+            // Consume headers
             String line;
-            while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                // no-op
-            }
+            while ((line = reader.readLine()) != null && !line.isEmpty()) { /* ignore */ }
 
             if (!"GET".equalsIgnoreCase(method)) {
                 sendHttpResponse(rawOut, "405 Method Not Allowed", "text/plain; charset=UTF-8",
@@ -188,20 +217,20 @@ public class MjpegHttpServer {
         // Headers
         pw.print("HTTP/1.1 200 OK\r\n");
         pw.print("Connection: close\r\n");
-        pw.print("Cache-Control: no-store\r\n");
+        pw.print("Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n");
         pw.print("Pragma: no-cache\r\n");
         pw.print("Content-Type: multipart/x-mixed-replace; boundary=" + boundary + "\r\n");
         pw.print("\r\n");
         pw.flush();
 
         // Stream loop
-        final long minFrameIntervalMs = 10; // ~100 fps ceiling; actual rate depends on producer
+        final long minFrameIntervalMs = 66; // ~15 fps pacing
         long lastSent = 0;
 
         while (running) {
             byte[] frame = frameSource != null ? frameSource.getLatestJpeg() : null;
             if (frame == null) {
-                sleepQuiet(50);
+                sleepQuiet(20);
                 continue;
             }
 
@@ -221,13 +250,9 @@ public class MjpegHttpServer {
             out.write(frame);
             out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
             out.flush();
-
-            // Small sleep to avoid hot loop if producer is super fast
-            // (MJPEG is pull-like; throttle a bit)
-            sleepQuiet(5);
         }
 
-        // Write closing boundary (some clients don’t require this)
+        // Closing boundary (optional for many clients)
         try {
             pw.print("--" + boundary + "--\r\n");
             pw.flush();
