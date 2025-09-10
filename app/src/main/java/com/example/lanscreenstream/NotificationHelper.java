@@ -12,7 +12,6 @@ import androidx.core.app.NotificationCompat;
 
 public class NotificationHelper {
     public static final String CHANNEL_ID = "stream_channel";
-
     public static void ensureChannel(Context ctx) {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationManager nm = ctx.getSystemService(NotificationManager.class);

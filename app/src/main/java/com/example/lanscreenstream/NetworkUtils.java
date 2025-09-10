@@ -7,6 +7,7 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.Build;
+import android.util.Log;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -15,10 +16,12 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 
+// … package & imports unchanged …
+
 public class NetworkUtils {
+    private static final String TAG = "NetworkUtils";
 
     public static String getLocalIp(Context ctx) {
-        // Try the active network first (Android 6+)
         try {
             ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm != null) {
@@ -26,17 +29,17 @@ public class NetworkUtils {
                 if (active != null) {
                     LinkProperties lp = cm.getLinkProperties(active);
                     if (lp != null) {
-                        List<LinkAddress> addrs = lp.getLinkAddresses();
-                        for (LinkAddress la : addrs) {
+                        for (LinkAddress la : lp.getLinkAddresses()) {
                             InetAddress a = la.getAddress();
                             if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
-                                return a.getHostAddress();
+                                String ip = a.getHostAddress();
+                                Log.i(TAG, "Active network IPv4: " + ip);
+                                return ip;
                             }
                         }
                     }
                 }
 
-                // Fallback: iterate all networks, prefer WIFI/ETHERNET
                 for (Network n : cm.getAllNetworks()) {
                     NetworkCapabilities nc = cm.getNetworkCapabilities(n);
                     if (nc == null) continue;
@@ -48,14 +51,17 @@ public class NetworkUtils {
                     for (LinkAddress la : lp.getLinkAddresses()) {
                         InetAddress a = la.getAddress();
                         if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
-                            return a.getHostAddress();
+                            String ip = a.getHostAddress();
+                            Log.i(TAG, "Fallback network IPv4: " + ip);
+                            return ip;
                         }
                     }
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "getLocalIp via ConnectivityManager failed", t);
+        }
 
-        // Last resort: enumerate interfaces
         try {
             Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
             for (NetworkInterface nif : Collections.list(ifaces)) {
@@ -63,12 +69,18 @@ public class NetworkUtils {
                 Enumeration<InetAddress> addrs = nif.getInetAddresses();
                 for (InetAddress a : Collections.list(addrs)) {
                     if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
-                        return a.getHostAddress();
+                        String ip = a.getHostAddress();
+                        Log.i(TAG, "Interface IPv4: " + nif.getName() + " -> " + ip);
+                        return ip;
                     }
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            Log.w(TAG, "getLocalIp via interfaces failed", t);
+        }
 
+        Log.e(TAG, "No non-loopback IPv4 found; returning 0.0.0.0");
         return "0.0.0.0";
     }
 }
+

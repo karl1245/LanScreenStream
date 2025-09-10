@@ -13,11 +13,10 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+
 public class MjpegHttpServer {
 
-    public interface FrameProvider {
-        byte[] getLatestJpeg();
-    }
+    public interface FrameProvider { byte[] getLatestJpeg(); }
 
     private static final String TAG = "MjpegHttpServer";
     private static final String BOUNDARY = "--mjpegframe";
@@ -36,19 +35,23 @@ public class MjpegHttpServer {
         if (running) return;
         running = true;
         serverSocket = new ServerSocket(port);
+        Log.i(TAG, "Server listening on " + port);
         pool.execute(() -> {
             while (running) {
                 try {
                     Socket s = serverSocket.accept();
+                    Log.d(TAG, "Client connected: " + s.getRemoteSocketAddress());
                     pool.execute(() -> serveClient(s));
-                } catch (IOException ignored) {
-                    if (!running) break;
+                } catch (IOException e) {
+                    if (!running) Log.d(TAG, "Server socket closed");
+                    else Log.e(TAG, "Accept failed", e);
                 }
             }
         });
     }
 
     public void stopServer() {
+        Log.d(TAG, "Stopping server");
         running = false;
         closeQuietly(serverSocket);
         pool.shutdownNow();
@@ -59,11 +62,12 @@ public class MjpegHttpServer {
              OutputStream raw = new BufferedOutputStream(s.getOutputStream())) {
 
             writeHeaders(raw);
+            Log.d(TAG, "Headers sent; streaming MJPEG");
 
             while (running && !s.isClosed()) {
                 byte[] jpeg = provider.getLatestJpeg();
                 if (jpeg == null) {
-                    sleepQuiet(20);
+                    Thread.sleep(20);
                     continue;
                 }
 
@@ -74,10 +78,10 @@ public class MjpegHttpServer {
                 raw.write(jpeg);
                 raw.flush();
 
-                // ~15 fps pacing to avoid saturating LAN
-                sleepQuiet(66);
+                Thread.sleep(66);
             }
-        } catch (IOException ignored) {
+        } catch (Exception e) {
+            Log.w(TAG, "Client stream ended: " + e.getMessage());
         }
     }
 
@@ -91,12 +95,9 @@ public class MjpegHttpServer {
         out.flush();
     }
 
-    private static void sleepQuiet(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
-    }
-
     private static void closeQuietly(Closeable c) {
         if (c == null) return;
         try { c.close(); } catch (IOException ignored) {}
     }
 }
+
