@@ -29,6 +29,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnStart, btnStop;
     private RadioButton rb1080, rb720, rb480;
     private TextView tvUrl;
+    private TextView tvStatus;
 
     private final BroadcastReceiver serviceReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
@@ -36,16 +37,19 @@ public class MainActivity extends AppCompatActivity {
             Log.d(TAG, "Broadcast received: " + action);
             if (StreamService.ACTION_STREAM_STARTED.equals(action)) {
                 setControlsEnabled(false);
+                if (tvStatus != null) tvStatus.setText("Status: Running");
+
                 String url = intent.getStringExtra(StreamService.EXTRA_URL);
-                Log.i(TAG, "Stream started. URL=" + url);
-                if (url != null) tvUrl.setText(url);
+                if (url != null && tvUrl != null) tvUrl.setText(url);
+
             } else if (StreamService.ACTION_STREAM_STOPPED.equals(action)) {
-                Log.i(TAG, "Stream stopped");
+                if (tvStatus != null) tvStatus.setText("Status: Stopped");
                 setControlsEnabled(true);
+
             } else if (StreamService.ACTION_STREAM_ERROR.equals(action)) {
                 String msg = intent.getStringExtra(StreamService.EXTRA_ERROR);
-                Log.e(TAG, "Stream error: " + msg);
-                tvUrl.setText("Error: " + msg);
+                if (tvUrl != null) tvUrl.setText("Error: " + msg);
+                if (tvStatus != null) tvStatus.setText("Status: Stopped");
                 setControlsEnabled(true);
             }
         }
@@ -78,6 +82,9 @@ public class MainActivity extends AppCompatActivity {
         rb720    = findViewById(R.id.rb720);
         rb480    = findViewById(R.id.rb480);
         tvUrl    = findViewById(R.id.tvUrl);
+        tvStatus = findViewById(R.id.tvStatus);
+
+        if (tvStatus != null) tvStatus.setText("Status: Stopped");
 
         btnStart.setOnClickListener(v -> checkAndStart());
         btnStop.setOnClickListener(v -> {
@@ -104,6 +111,15 @@ public class MainActivity extends AppCompatActivity {
             registerReceiver(serviceReceiver, f, Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(serviceReceiver, f);
+        }
+        if (StreamService.IS_RUNNING) {
+            setControlsEnabled(false);
+            if (tvStatus != null) tvStatus.setText("Status: Running");
+            if (StreamService.LAST_URL != null && tvUrl != null) {
+                tvUrl.setText(StreamService.LAST_URL);
+            }
+        } else {
+            if (tvStatus != null) tvStatus.setText("Status: Stopped");
         }
     }
 

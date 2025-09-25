@@ -27,6 +27,8 @@ public class StreamService extends Service implements MjpegHttpServer.FrameProvi
     public static final String ACTION_STREAM_STARTED = "com.example.lanscreenstream.STREAM_STARTED";
     public static final String ACTION_STREAM_STOPPED = "com.example.lanscreenstream.STREAM_STOPPED";
     public static final String ACTION_STREAM_ERROR   = "com.example.lanscreenstream.STREAM_ERROR";
+    public static volatile boolean IS_RUNNING = false;
+    public static volatile String  LAST_URL   = null;
 
     public static final String EXTRA_RESULT_CODE = "result_code";
     public static final String EXTRA_RESULT_DATA = "result_data";
@@ -157,12 +159,16 @@ public class StreamService extends Service implements MjpegHttpServer.FrameProvi
             String ip  = NetworkUtils.getLocalIp(this);
             String url = "http://" + ip + ":" + PORT + "/stream";
             Log.i(TAG, "Serving at " + url);
+            LAST_URL   = url;
+            IS_RUNNING = true;
 
             // Update notification with URL (safe to call again)
             Notification updated = NotificationHelper.buildForeground(this, url);
             startForeground(1, updated);
 
-            sendBroadcast(new Intent(ACTION_STREAM_STARTED).putExtra(EXTRA_URL, url));
+            sendBroadcast(new Intent(ACTION_STREAM_STARTED)
+                    .setPackage(getPackageName())
+                    .putExtra(EXTRA_URL, url));
         } catch (SecurityException se) {
             Log.e(TAG, "SecurityException during setupProjection", se);
             sendError("SecurityException: " + se.getMessage());
@@ -176,7 +182,9 @@ public class StreamService extends Service implements MjpegHttpServer.FrameProvi
 
     private void sendError(String message) {
         Log.e(TAG, "sendError: " + message);
-        sendBroadcast(new Intent(ACTION_STREAM_ERROR).putExtra(EXTRA_ERROR, message));
+        sendBroadcast(new Intent(ACTION_STREAM_ERROR)
+                .setPackage(getPackageName())
+                .putExtra(EXTRA_ERROR, message));
     }
 
     @Override public void onDestroy() {
@@ -189,7 +197,10 @@ public class StreamService extends Service implements MjpegHttpServer.FrameProvi
         } catch (Throwable t) {
             Log.w(TAG, "Cleanup error", t);
         }
-        sendBroadcast(new Intent(ACTION_STREAM_STOPPED));
+        IS_RUNNING = false;
+        LAST_URL   = null;
+        sendBroadcast(new Intent(ACTION_STREAM_STOPPED)
+                .setPackage(getPackageName()));
         if (worker != null) { worker.quitSafely(); worker = null; }
         super.onDestroy();
     }
